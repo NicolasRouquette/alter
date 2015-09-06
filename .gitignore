@@ -1,0 +1,29 @@
+# Ignore all dotfiles...
+# except for .gitignore
+!.gitignore
+
+.idea/
+.bintray/
+
+# Ignore Play! working directory #
+db
+eclipse
+log
+logs
+*.log
+precompiled
+project/project
+project/target
+target
+tmp
+test-result
+server.pid
+*.eml
+dist
+out
+my-assets
+*.stackdump
+
+# Ignore local application.conf changes
+/conf/application.local-*.conf
+/conf/generated.keystore

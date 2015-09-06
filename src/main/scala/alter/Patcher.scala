@@ -1,5 +1,8 @@
 package alter
 
+import shapeless.labelled._
+import shapeless._
+
 import scala.annotation.tailrec
 import scala.collection.immutable.{:: => **}
 import scala.reflect.ClassTag
@@ -74,10 +77,46 @@ object Patcher {
         case _ => None
       }
 
-      step(script, Map.empty) match {
+      step(script, src) match {
         case None => Left("Unable to fold")
         case Some(result) => Right(result)
       }
     }
   }
+
+  implicit val patcherHNil: Patcher[HNil] = new Patcher[HNil] {
+    override def patch(script: EditScript, src: HNil): Either[String, HNil] = Right(HNil)
+  }
+
+  implicit def patcherHCon[K <: Symbol, V, T <: HList](implicit witness: Witness.Aux[K],
+    patcherV: Lazy[Patcher[V]],
+    patcherT: Lazy[Patcher[T]]): Patcher[FieldType[K, V] :: T] = {
+    new Patcher[FieldType[K, V] :: T] {
+      override def patch(script: EditScript, src: ::[FieldType[K, V], T]): Either[String, ::[FieldType[K, V], T]] = script match {
+        case Changes(changes) =>
+          def getV = {
+            changes find {
+              case Named(key: String, _) if key == witness.value.name => true
+              case _ => false
+            } collect {
+              case Named(_, change) => patcherV.value.patch(change, src.head)
+            } getOrElse Left("error")
+          }
+
+          for {
+            v <- getV.right
+            t <- patcherT.value.patch(Changes(changes), src.tail).right
+          } yield field[K](v) :: t
+        case _ => Left("Error")
+      }
+    }
+  }
+
+  implicit def patcherGen[T, R](implicit
+    gen: LabelledGeneric.Aux[T, R],
+    patcherRepr: Lazy[Patcher[R]]): Patcher[T] = new Patcher[T] {
+    override def patch(script: EditScript, src: T): Either[String, T] = patcherRepr.value.patch(script, gen.to(src)).right.map(gen.from)
+  }
+
+  def apply[T](implicit a: Patcher[T]): Patcher[T] = a
 }

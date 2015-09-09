@@ -21,6 +21,7 @@ object Patcher {
     }
   }
 
+  implicit val bool = primitivePatcher[Boolean]
   implicit val int = primitivePatcher[Int]
   implicit val float = primitivePatcher[Float]
   implicit val double = primitivePatcher[Double]
@@ -29,10 +30,18 @@ object Patcher {
   implicit val short = primitivePatcher[Short]
   implicit val byte = primitivePatcher[Byte]
 
-  implicit def list[A : ClassTag]: Patcher[List[A]] = new Patcher[List[A]] {
-    override def patch(script: EditScript, src: List[A]): Either[String, List[A]] = {
+  implicit def option[A : ClassTag]: Patcher[Option[A]] = new Patcher[Option[A]] {
+    override def patch(script: EditScript, src: Option[A]): Either[String, Option[A]] = script match {
+      case Copy(a: Option[A]) => Right(a)
+      case Update(a: Option[A]) => Right(a)
+      case _ => Left("Patch error")
+    }
+  }
+
+  implicit def set[A : ClassTag]: Patcher[Set[A]] = new Patcher[Set[A]] {
+    override def patch(script: EditScript, src: Set[A]): Either[String, Set[A]] = {
       @tailrec
-      def iterate(s: List[EditScript], acc: List[A]): Option[List[A]] = s match {
+      def iterate(s: List[EditScript], acc: Set[A]): Option[Set[A]] = s match {
         case x ** xs => step(x, acc) match {
           case None => None
           case Some(r) => iterate(xs, r)
@@ -40,7 +49,35 @@ object Patcher {
         case Nil => Some(acc)
       }
 
-      def step(s: EditScript, acc: List[A]): Option[List[A]] = s match {
+      def step(s: EditScript, acc: Set[A]): Option[Set[A]] = s match {
+        case Changes(scripts) => iterate(scripts, acc)
+        case Insert(elem: A) => Some(acc + elem)
+        case Delete(elem: A) => Some(acc - elem)
+        case Copy(elem: A) => Some(acc + elem)
+        case Replace(from: A, to: A) => Some(acc + to)
+        case Nothing => Some(acc)
+        case _ => None
+      }
+
+      step(script, src) match {
+        case None => Left("Unable to fold")
+        case Some(result) => Right(result)
+      }
+    }
+  }
+
+  implicit def list[A : ClassTag]: Patcher[Seq[A]] = new Patcher[Seq[A]] {
+    override def patch(script: EditScript, src: Seq[A]): Either[String, Seq[A]] = {
+      @tailrec
+      def iterate(s: List[EditScript], acc: Seq[A]): Option[Seq[A]] = s match {
+        case x ** xs => step(x, acc) match {
+          case None => None
+          case Some(r) => iterate(xs, r)
+        }
+        case Nil => Some(acc)
+      }
+
+      def step(s: EditScript, acc: Seq[A]): Option[Seq[A]] = s match {
         case Changes(scripts) => iterate(scripts, acc)
         case Insert(elem: A) => Some(acc :+ elem)
         case Delete(elem: A) => Some(acc)
@@ -50,7 +87,7 @@ object Patcher {
         case _ => None
       }
 
-      step(script, List.empty) match {
+      step(script, Seq.empty[A]) match {
         case None => Left("Unable to fold")
         case Some(result) => Right(result)
       }

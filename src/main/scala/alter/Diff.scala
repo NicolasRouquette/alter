@@ -62,7 +62,21 @@ trait Diff[A] {
 
 
 object Diff {
-  implicit def opt[A](implicit deltaA: Diff[A]): Diff[Option[A]] = new Diff[Option[A]] {
+
+  def primitiveDiff[A]: Diff[A] = new Diff[A] {
+    def diff(source: A, target: A) = if (source == target) Copy(source) else Update(target)
+  }
+
+  implicit val bool = primitiveDiff[Boolean]
+  implicit val int = primitiveDiff[Int]
+  implicit val double = primitiveDiff[Double]
+  implicit val float = primitiveDiff[Float]
+  implicit val long = primitiveDiff[Long]
+  implicit val short = primitiveDiff[Short]
+  implicit val byte = primitiveDiff[Byte]
+  implicit val string = primitiveDiff[String]
+
+  implicit def optionDiff[A](implicit deltaA: Diff[A]): Diff[Option[A]] = new Diff[Option[A]] {
     override def diff(source: Option[A], target: Option[A]): EditScript = (source, target) match {
       case (Some(x), Some(y)) =>
         def allCopies(delta: List[EditScript]): Boolean = {
@@ -82,19 +96,7 @@ object Diff {
     }
   }
 
-  def primitiveDiff[A]: Diff[A] = new Diff[A] {
-    def diff(source: A, target: A) = if (source == target) Copy(source) else Update(target)
-  }
-
-  implicit val int = primitiveDiff[Int]
-  implicit val double = primitiveDiff[Double]
-  implicit val float = primitiveDiff[Float]
-  implicit val long = primitiveDiff[Long]
-  implicit val short = primitiveDiff[Short]
-  implicit val byte = primitiveDiff[Byte]
-  implicit val string = primitiveDiff[String]
-
-  implicit def deltaMap[K, V](implicit deltaV: Diff[V]): Diff[Map[K, V]] = new Diff[Map[K, V]] {
+  implicit def mapDiff[K, V](implicit diffV: Diff[V]): Diff[Map[K, V]] = new Diff[Map[K, V]] {
     def diff(source: Map[K, V], target: Map[K, V]): EditScript = {
       val removedKeys = source.keySet -- target.keySet
       val addedKeys = target.keySet -- source.keySet
@@ -102,14 +104,28 @@ object Diff {
 
       val removes = removedKeys.foldLeft(Nothing: EditScript) { case (acc, v) => acc + Named(v, Delete(source(v))) }
       val adds = addedKeys.foldLeft(Nothing: EditScript) { case (acc, v) => acc + Named(v, Insert(target(v))) }
-      val updates = sameKeys.foldLeft(Nothing: EditScript) { case (acc, v) => acc + Named(v, deltaV.diff(source(v), target(v))) }
+      val copies = sameKeys.foldLeft(Nothing: EditScript) { case (acc, v) => acc + Named(v, diffV.diff(source(v), target(v))) }
 
-      removes + updates + adds
+      removes + copies + adds
     }
   }
 
-  implicit def levensthein[A](implicit deltaA: Diff[A]): Diff[List[A]] = new Diff[List[A]] {
-    override def diff(source: List[A], target: List[A]): EditScript = {
+  implicit def setDiff[A]: Diff[Set[A]] = new Diff[Set[A]] {
+    override def diff(source: Set[A], target: Set[A]): EditScript = {
+      val removedValues = source -- target
+      val addedValues = target -- source
+      val copiedValues = source.intersect(target)
+
+      val removes = removedValues.foldLeft(Nothing: EditScript) { case (acc, v) => acc + Delete(v) }
+      val adds = addedValues.foldLeft(Nothing: EditScript) { case (acc, v) => acc + Insert(v) }
+      val copies = copiedValues.foldLeft(Nothing: EditScript) { case (acc, v) => acc + Copy(v) }
+
+      removes + copies + adds
+    }
+  }
+
+  implicit def seqDiff[A]: Diff[Seq[A]] = new Diff[Seq[A]] {
+    override def diff(source: Seq[A], target: Seq[A]): EditScript = {
       def minimum(i1: Int, i2: Int, i3: Int)= Math.min(Math.min(i1, i2), i3)
 
       val matrix = {
@@ -189,11 +205,11 @@ object Diff {
 //    }
 //  }
 
-  implicit val deltaHNil: Diff[HNil] = new Diff[HNil] {
+  implicit val hnilDiff: Diff[HNil] = new Diff[HNil] {
     def diff(source: HNil, target: HNil) = Nothing
   }
 
-  implicit def deltaHCon[K <: Symbol, V, T <: HList](implicit witness: Witness.Aux[K],
+  implicit def hconDiff[K <: Symbol, V, T <: HList](implicit witness: Witness.Aux[K],
     deltaV: Lazy[Diff[V]],
     deltaT: Lazy[Diff[T]]): Diff[FieldType[K, V] :: T] = {
     new Diff[FieldType[K, V] :: T] {
@@ -203,11 +219,11 @@ object Diff {
     }
   }
 
-  implicit val deltaCNil: Diff[CNil] = new Diff[CNil] {
+  implicit val cnilDiff: Diff[CNil] = new Diff[CNil] {
     def diff(source: CNil, target: CNil) = Nothing
   }
 
-  implicit def deltaCCon[K <: Symbol, V, T <: Coproduct](implicit witness: Witness.Aux[K],
+  implicit def cconDiff[K <: Symbol, V, T <: Coproduct](implicit witness: Witness.Aux[K],
     deltaV: Lazy[Diff[V]],
     deltaT: Lazy[Diff[T]]): Diff[FieldType[K, V] :+: T] = {
     new Diff[FieldType[K, V] :+: T] {
@@ -220,7 +236,7 @@ object Diff {
     }
   }
 
-  implicit def deltaGen[T, R](implicit
+  implicit def genDiff[T, R](implicit
     gen: LabelledGeneric.Aux[T, R],
     deltaRepr: Lazy[Diff[R]]): Diff[T] = new Diff[T] {
     override def diff(source: T, target: T) = deltaRepr.value.diff(gen.to(source), gen.to(target))

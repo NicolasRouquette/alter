@@ -136,7 +136,7 @@ object Diff {
             if(target(j-1)==source(i-1)) {
               dist(j-1)(i-1)
             } else {
-              minimum(dist(j-1)(i)+1, dist(j)(i-1)+1, dist(j-1)(i-1)+1)
+              minimum(dist(j-1)(i)+1, dist(j)(i-1)+1, dist(j-1)(i-1)+2)
             }
           }
         }
@@ -149,7 +149,7 @@ object Diff {
           backtrace(j - 1, i) + Insert(target(j - 1))
         } else if (i > 0 && matrix(j)(i - 1) + 1 == matrix(j)(i)) {
           backtrace(j, i - 1) + Delete(source(i - 1))
-        } else if (j > 0 && i > 0 && matrix(j - 1)(i - 1) + 1 == matrix(j)(i)) {
+        } else if (j > 0 && i > 0 && matrix(j - 1)(i - 1) + 2 == matrix(j)(i)) {
           backtrace(j - 1, i - 1) + Replace(source(i - 1), target(j - 1))
         } else if (j > 0 && i > 0 && matrix(j - 1)(i - 1) == matrix(j)(i)) {
           backtrace(j - 1, i - 1) + Copy(source(i - 1))

@@ -1,13 +1,23 @@
 package alter
 
+sealed trait Tree[A]
+case class Node[A](a: Tree[A], b: Tree[A]) extends Tree[A]
+case class Leaf[A](value: A) extends Tree[A]
+
+case class Person(id: Int, name: String)
+
 object TestApp  extends App {
 
-  case class Person(id: Int, name: String)
+  val karel = Person(1, "Karel")
+  val dirk = Person(2, "Dirk")
+  val mark = Person(3, "Mark")
+  val frits = Person(4, "Frits")
+  val klaas = Person(5, "Klaas")
 
-  val x = Person(1, "Mark")
-  val y = Person(1, "Hans")
-  val script = Diff[Person].diff(x,y)
+  val xs = List(karel, dirk, frits, mark)
+  val ys = List(klaas, mark, dirk, frits)
 
-  println(script)
-  println(Patcher[Person].patch(script, x))
+
+  println(Diff[List[Person]].diff(xs, ys))
+//  println(Patcher[Tree[Int]].patch(script, x))
 }

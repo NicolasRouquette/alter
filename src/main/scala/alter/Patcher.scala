@@ -13,21 +13,21 @@ trait Patcher[A] {
 
 object Patcher {
 
-  implicit val int: Patcher[Int] = new Patcher[Int] {
-    override def patch(script: EditScript, src: Int): Either[String, Int] = script match {
-      case Update(to: Int) => Right(to)
-      case Copy(to: Int) => Right(to)
+  def primitivePatcher[A : ClassTag]: Patcher[A] = new Patcher[A] {
+    override def patch(script: EditScript, src: A): Either[String, A] = script match {
+      case Update(to: A) => Right(to)
+      case Copy(to: A) => Right(to)
       case _ => Left("Unable to converge")
     }
   }
 
-  implicit val string: Patcher[String] = new Patcher[String] {
-    override def patch(script: EditScript, src: String): Either[String, String] = script match {
-      case Update(to: String) => Right(to)
-      case Copy(to: String) => Right(to)
-      case _ => Left("Unable to converge")
-    }
-  }
+  implicit val int = primitivePatcher[Int]
+  implicit val float = primitivePatcher[Float]
+  implicit val double = primitivePatcher[Double]
+  implicit val long = primitivePatcher[Long]
+  implicit val string = primitivePatcher[String]
+  implicit val short = primitivePatcher[Short]
+  implicit val byte = primitivePatcher[Byte]
 
   implicit def list[A : ClassTag]: Patcher[List[A]] = new Patcher[List[A]] {
     override def patch(script: EditScript, src: List[A]): Either[String, List[A]] = {
@@ -42,9 +42,10 @@ object Patcher {
 
       def step(s: EditScript, acc: List[A]): Option[List[A]] = s match {
         case Changes(scripts) => iterate(scripts, acc)
-        case Insert(elem: A) => Some(elem +: acc)
+        case Insert(elem: A) => Some(acc :+ elem)
         case Delete(elem: A) => Some(acc)
-        case Copy(elem: A) => Some(elem +: acc)
+        case Copy(elem: A) => Some(acc :+ elem)
+        case Replace(from: A, to: A) => Some(acc :+ to)
         case Nothing => Some(acc)
         case _ => None
       }
@@ -94,20 +95,21 @@ object Patcher {
     new Patcher[FieldType[K, V] :: T] {
       override def patch(script: EditScript, src: ::[FieldType[K, V], T]): Either[String, ::[FieldType[K, V], T]] = script match {
         case Changes(changes) =>
-          def getV = {
-            changes find {
-              case Named(key: String, _) if key == witness.value.name => true
-              case _ => false
-            } collect {
-              case Named(_, change) => patcherV.value.patch(change, src.head)
-            } getOrElse Left("error")
-          }
-
           for {
-            v <- getV.right
+            v <- {
+              changes find {
+                case Named(key: String, _) if key == witness.value.name => true
+                case _ => false
+              } collect {
+                case Named(_, change) => patcherV.value.patch(change, src.head)
+              } getOrElse {
+                Left(s"No matching EditScript.Changes('${witness.value.name}', _) for this case class")
+              }
+            }.right
             t <- patcherT.value.patch(Changes(changes), src.tail).right
           } yield field[K](v) :: t
-        case _ => Left("Error")
+
+        case _ => Left(s"Only EditScript.Changes supported for field case class at field '${witness.value.name}', script is: $script")
       }
     }
   }

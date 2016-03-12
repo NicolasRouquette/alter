@@ -15,8 +15,8 @@ object Patcher {
 
   def primitivePatcher[A : ClassTag]: Patcher[A] = new Patcher[A] {
     override def patch(script: EditScript, src: A): Either[String, A] = script match {
-      case Update(to: A) => Right(to)
-      case Copy(to: A) => Right(to)
+      case EditScript.Update(to: A) => Right(to)
+      case EditScript.Nothing => Right(src)
       case _ => Left("Unable to converge")
     }
   }
@@ -32,8 +32,8 @@ object Patcher {
 
   implicit def option[A : ClassTag]: Patcher[Option[A]] = new Patcher[Option[A]] {
     override def patch(script: EditScript, src: Option[A]): Either[String, Option[A]] = script match {
-      case Copy(a: Option[A]) => Right(a)
-      case Update(a: Option[A]) => Right(a)
+      case EditScript.Nothing => Right(src)
+      case EditScript.Update(a: Option[A]) => Right(a)
       case _ => Left("Patch error")
     }
   }

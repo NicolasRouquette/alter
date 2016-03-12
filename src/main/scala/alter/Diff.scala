@@ -1,5 +1,9 @@
 package alter
 
+import cats.Monoid
+import cats.data.Xor
+import cats.functor.Contravariant
+import cats.syntax.all._
 import shapeless._
 import shapeless.labelled._
 
@@ -7,54 +11,36 @@ import scala.annotation.tailrec
 import scala.collection.immutable.{:: => **}
 
 
-sealed trait EditScript {
-  self =>
+sealed trait EditScript
 
-  def +(s: EditScript): EditScript = (self, s) match {
-    case (Changes(x), Changes(y)) => Changes(x ++ y)
-    case (Changes(x), o) => Changes(x :+ o)
-    case (o, Changes(x)) => Changes(o +: x)
-    case (Nothing, Nothing) => Nothing
-    case (Nothing, y) => y
-    case (x, Nothing) => x
-    case (x, y) => Changes(List(x, y))
-  }
+object EditScript {
 
-  def cost: Int = {
-    def costOperation(s: EditScript): Int = {
-      @tailrec
-      def loop(changes: List[EditScript], cost: Int): Int = changes match {
-        case x ** xs => loop(xs, cost + costOperation(x))
-        case Nil => cost
-      }
+  final case class SetInsert[A](elem: A) extends EditScript
+  final case class SetRemove[A](elem: A) extends EditScript
+  final case class MapInsert[K, V](key: K, value: V) extends EditScript
+  final case class MapRemove[K](key: K) extends EditScript
+  final case class ListInsert[A](at: Int, value: A) extends EditScript
+  final case class ListRemove(at: Int) extends EditScript
+  final case class ListMove(from: Int, to: Int) extends EditScript
+  final case class Changes(script: List[EditScript]) extends EditScript
+  final case class Update[A](to: A) extends EditScript
+  final case class Named[A](name: A, script: EditScript) extends EditScript
+  case object Nothing extends EditScript
 
-      s match {
-        case Changes(changes) => loop(changes, 0)
-        case Named(_, x) => costOperation(x)
-        case Nothing => 0
-        case Copy(_) => 0
-        case _ => 1
-      }
+
+  implicit val monoid = new Monoid[EditScript] {
+    def empty = Nothing
+    def combine(left: EditScript, right: EditScript) = (left, right) match {
+      case (Changes(x), Changes(y)) => Changes(x ++ y)
+      case (Changes(x), o) => Changes(x :+ o)
+      case (o, Changes(x)) => Changes(o +: x)
+      case (Nothing, Nothing) => Nothing
+      case (Nothing, y) => y
+      case (x, Nothing) => x
+      case (x, y) => Changes(List(x, y))
     }
-
-    costOperation(self)
-  }
-
-  def longest(other: EditScript) = if (self.cost <= other.cost) self else other
-
-  def isSame = self match {
-    case Copy(_) => true
-    case _ => false
   }
 }
-case class Insert[A](elem: A) extends EditScript
-case class Delete[A](elem: A) extends EditScript
-case class Changes(script: List[EditScript]) extends EditScript
-case class Update[A](to: A) extends EditScript
-case class Named[A](name: A, script: EditScript) extends EditScript
-case class Copy[A](value: A) extends EditScript
-case class Replace[A](replaceValue: A, withValue: A) extends EditScript
-case object Nothing extends EditScript
 
 trait Diff[A] {
   def diff(source: A, target: A): EditScript
@@ -63,9 +49,11 @@ trait Diff[A] {
 
 object Diff {
 
-  def primitiveDiff[A]: Diff[A] = new Diff[A] {
-    def diff(source: A, target: A) = if (source == target) Copy(source) else Update(target)
+  def apply[A](f: (A, A) => EditScript): Diff[A] = new Diff[A] {
+    override def diff(source: A, target: A): EditScript = f(source, target)
   }
+
+  private def primitiveDiff[A]: Diff[A] = Diff((src, tar) => if (src == tar) EditScript.Nothing else EditScript.Update(tar))
 
   implicit val bool = primitiveDiff[Boolean]
   implicit val int = primitiveDiff[Int]
@@ -76,23 +64,33 @@ object Diff {
   implicit val byte = primitiveDiff[Byte]
   implicit val string = primitiveDiff[String]
 
+
+  implicit def eitherDiff[L, R](implicit diffL: Diff[L], diffR: Diff[R]) = new Diff[Either[L, R]] {
+    override def diff(source: Either[L, R], target: Either[L, R]): EditScript = (source, target) match {
+      case (Left(l1), Left(l2)) => diffL.diff(l1, l2)
+      case (Right(r1), Right(r2)) => diffR.diff(r1, r2)
+      case (Left(l1), Right(r1)) => EditScript.Update(Right(r1))
+      case (Right(r1), Left(l1)) => EditScript.Update(Left(l1))
+    }
+  }
+
   implicit def optionDiff[A](implicit deltaA: Diff[A]): Diff[Option[A]] = new Diff[Option[A]] {
     override def diff(source: Option[A], target: Option[A]): EditScript = (source, target) match {
       case (Some(x), Some(y)) =>
         def allCopies(delta: List[EditScript]): Boolean = {
           delta.forall {
-            case Changes(xs) => allCopies(xs)
-            case Named(_, more) => allCopies(List(more))
-            case Copy(_) => true
+            case EditScript.Changes(xs) => allCopies(xs)
+            case EditScript.Named(_, more) => allCopies(List(more))
+            case EditScript.Nothing => true
             case _ => false
           }
         }
-        if (allCopies(List(deltaA.diff(x, y)))) Copy(Some(x))
-        else Update(Some(y))
+        if (allCopies(List(deltaA.diff(x, y)))) EditScript.Nothing
+        else EditScript.Update(Some(y))
 
-      case (None, None) => Copy(None)
-      case (Some(x), None) => Update(None)
-      case (None, Some(y)) => Update(Some(y))
+      case (None, None) => EditScript.Nothing
+      case (Some(x), None) => EditScript.Update(None)
+      case (None, Some(y)) => EditScript.Update(Some(y))
     }
   }
 
@@ -100,13 +98,29 @@ object Diff {
     def diff(source: Map[K, V], target: Map[K, V]): EditScript = {
       val removedKeys = source.keySet -- target.keySet
       val addedKeys = target.keySet -- source.keySet
-      val sameKeys = source.keySet.intersect(target.keySet)
 
-      val removes = removedKeys.foldLeft(Nothing: EditScript) { case (acc, v) => acc + Named(v, Delete(source(v))) }
-      val adds = addedKeys.foldLeft(Nothing: EditScript) { case (acc, v) => acc + Named(v, Insert(target(v))) }
-      val copies = sameKeys.foldLeft(Nothing: EditScript) { case (acc, v) => acc + Named(v, diffV.diff(source(v), target(v))) }
+      val removes: List[EditScript] = removedKeys.map(k => EditScript.MapRemove(k)).toList
+      val adds: List[EditScript] = addedKeys.flatMap(k => target.get(k).map(v => EditScript.MapInsert(k, v))).toList
 
-      removes + copies + adds
+      EditScript.Changes(removes ++ adds)
+    }
+  }
+
+  implicit def listDiff[A]: Diff[List[A]] = new Diff[List[A]] {
+    override def diff(source: List[A], target: List[A]): EditScript = {
+      val sourceIndices = source.zipWithIndex.toMap
+      val targetIndices = source.zipWithIndex.toMap
+
+      val deletes: List[EditScript] = source.filterNot(targetIndices.contains).flatMap(sourceIndices.get).map(EditScript.ListRemove)
+      val inserts: List[EditScript] = target.filterNot(sourceIndices.contains).flatMap(x => targetIndices.get(x).map(_ -> x)).map { case (idx, v) => EditScript.ListInsert(idx, v) }
+      val moves: List[EditScript] = source
+        .zipWithIndex
+        .filterNot { case (el, _) => deletes.contains(el) }
+        .flatMap { case (el, prevIndex) => targetIndices.get(el).map(targetIndex => prevIndex -> targetIndex) }
+        .filter { case (previousIndex, currentIdx) => currentIdx != previousIndex }
+        .map { case (previousIndex, currentIdx) => EditScript.ListMove(currentIdx, previousIndex) }
+
+      EditScript.Changes(deletes ++ inserts ++ moves)
     }
   }
 
@@ -116,111 +130,25 @@ object Diff {
       val addedValues = target -- source
       val copiedValues = source.intersect(target)
 
-      val removes = removedValues.foldLeft(Nothing: EditScript) { case (acc, v) => acc + Delete(v) }
-      val adds = addedValues.foldLeft(Nothing: EditScript) { case (acc, v) => acc + Insert(v) }
-      val copies = copiedValues.foldLeft(Nothing: EditScript) { case (acc, v) => acc + Copy(v) }
+      val removes: List[EditScript] = removedValues.map(EditScript.SetRemove(_)).toList
+      val adds: List[EditScript] = addedValues.map(EditScript.SetInsert(_)).toList
 
-      removes + copies + adds
+      EditScript.Changes(removes ++ adds)
     }
   }
-
-  implicit def seqDiff[A]: Diff[Seq[A]] = new Diff[Seq[A]] {
-    override def diff(source: Seq[A], target: Seq[A]): EditScript = {
-      def minimum(i1: Int, i2: Int, i3: Int)= Math.min(Math.min(i1, i2), i3)
-
-      val matrix = {
-        val dist=Array.tabulate(target.length+1, source.length+1){(j,i)=>if(j==0) i else if (i==0) j else 0}
-
-        for(j<-1 to target.length; i<-1 to source.length) {
-          dist(j)(i) = {
-            if(target(j-1)==source(i-1)) {
-              dist(j-1)(i-1)
-            } else {
-              minimum(dist(j-1)(i)+1, dist(j)(i-1)+1, dist(j-1)(i-1)+2)
-            }
-          }
-        }
-
-        dist
-      }
-
-      def backtrace(j: Int, i: Int): EditScript = {
-        if (j > 0 && matrix(j - 1)(i) + 1 == matrix(j)(i)) {
-          backtrace(j - 1, i) + Insert(target(j - 1))
-        } else if (i > 0 && matrix(j)(i - 1) + 1 == matrix(j)(i)) {
-          backtrace(j, i - 1) + Delete(source(i - 1))
-        } else if (j > 0 && i > 0 && matrix(j - 1)(i - 1) + 2 == matrix(j)(i)) {
-          backtrace(j - 1, i - 1) + Replace(source(i - 1), target(j - 1))
-        } else if (j > 0 && i > 0 && matrix(j - 1)(i - 1) == matrix(j)(i)) {
-          backtrace(j - 1, i - 1) + Copy(source(i - 1))
-        } else {
-          Nothing
-        }
-      }
-
-      backtrace(target.length, source.length)
-    }
-  }
-
-//  private case class Memo[A, B](cache: scala.collection.mutable.Map[A, B])(f: A => TailRec[B]) extends (A => TailRec[B]) {
-//    def apply(x: A) =
-//      cache.lift(x) match {
-//        case Some(res) => done(res)
-//        case None => f(x).flatMap {
-//          case res =>
-//            cache.update(x, res)
-//            done(res)
-//        }
-//      }
-//  }
-
-//  implicit def deltaList[A](implicit deltaA: Diff[A]): Diff[List[A]] = new Diff[List[A]] {
-//    override def diff(source: List[A], target: List[A]) = {
-//
-//      type I = (List[A], List[A])
-//      type Dict = scala.collection.mutable.Map[I, EditScript]
-//
-//      def loop(cache: Dict, acc: EditScript): Memo[I, EditScript] = Memo(cache) {
-//        case (Nil, Nil) => done(acc)
-//        case (Nil, y ** ys) => tailcall(loop(cache, Insert(y) + acc)(List.empty[A], ys))
-//        case (x ** xs, Nil) => tailcall(loop(cache, Delete(x) + acc)(xs, List.empty[A]))
-//        case (x ** xs, y ** ys) =>
-//          val delta = deltaA.diff(x, y)
-//          def best2 = for {
-//            a <- tailcall(loop(cache, Delete(x) + acc)(xs, y +: ys))
-//            b <- tailcall(loop(cache, Insert(y) + acc)(x +: xs, ys))
-//          } yield a longest b
-//
-//          def best3 = for {
-//            a <- tailcall(loop(cache, Copy(x) + acc)(xs, ys))
-//            b <- best2
-//          } yield a longest b
-//
-//          if(delta.cost < 0) tailcall(loop(cache, Changes(List(delta)))(xs,ys))
-//          if(x == y) best3
-//          else best2
-//
-//      }
-//      loop(scala.collection.mutable.Map.empty, Nothing)(source, target).result
-//    }
-//  }
 
   implicit val hnilDiff: Diff[HNil] = new Diff[HNil] {
-    def diff(source: HNil, target: HNil) = Nothing
+    def diff(source: HNil, target: HNil) = EditScript.Nothing
   }
 
   implicit def hconDiff[K <: Symbol, V, T <: HList](implicit witness: Witness.Aux[K],
-    deltaV: Lazy[Diff[V]],
-    deltaT: Lazy[Diff[T]]): Diff[FieldType[K, V] :: T] = {
-    new Diff[FieldType[K, V] :: T] {
-      def diff(source: FieldType[K, V] :: T, target: FieldType[K, V] :: T) = {
-        Named(witness.value.name, deltaV.value.diff(source.head, target.head)) + deltaT.value.diff(source.tail, target.tail)
-      }
-    }
-  }
+                                                    diffV: Lazy[Diff[V]],
+                                                    diffT: Lazy[Diff[T]]): Diff[FieldType[K, V] :: T] =
+    Diff((src, tar) => EditScript.monoid.combine(EditScript.Named(witness.value.name, diffV.value.diff(src.head, tar.head)), diffT.value.diff(src.tail, tar.tail)))
+
 
   implicit val cnilDiff: Diff[CNil] = new Diff[CNil] {
-    def diff(source: CNil, target: CNil) = Nothing
+    def diff(source: CNil, target: CNil) = EditScript.Nothing
   }
 
   implicit def cconDiff[K <: Symbol, V, T <: Coproduct](implicit witness: Witness.Aux[K],
@@ -230,8 +158,8 @@ object Diff {
       def diff(source: FieldType[K, V] :+: T, target: FieldType[K, V] :+: T) = (source, target) match {
         case (Inl(x), Inl(y)) => deltaV.value.diff(x, y)
         case (Inr(x), Inr(y)) => deltaT.value.diff(x, y)
-        case (_, Inr(y)) => Update(y)
-        case (_, Inl(y)) => Update(y)
+        case (_, Inr(y)) => EditScript.Update(y)
+        case (_, Inl(y)) => EditScript.Update(y)
       }
     }
   }
@@ -240,6 +168,10 @@ object Diff {
     gen: LabelledGeneric.Aux[T, R],
     deltaRepr: Lazy[Diff[R]]): Diff[T] = new Diff[T] {
     override def diff(source: T, target: T) = deltaRepr.value.diff(gen.to(source), gen.to(target))
+  }
+
+  implicit def contravariant = new Contravariant[Diff] {
+    def contramap[A, B](fa: Diff[A])(f: (B) => A) = Diff((src, tar) => fa.diff(f(src), f(tar)))
   }
 
   def apply[T](implicit a: Diff[T]): Diff[T] = a

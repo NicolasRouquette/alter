@@ -31,6 +31,7 @@ object DiffSpec extends Properties("DiffSpec") {
   property("byte should converge") = forAll { (a: Byte, b: Byte) => converge(a, b) }
   property("string should converge") = forAll { (a: String, b: String) => converge(a, b) }
   property("option should converge") = forAll { (a: Option[Int], b: Option[Int]) => converge(a,b) }
+  property("either should converge") = forAll { (a: Either[Int, Int], b: Either[Int, Int]) => converge(a,b) }
   property("list should converge") = forAll { (a: Seq[Int], b: Seq[Int]) => converge(a,b) }
   property("set should converge") = forAll { (a: Set[Int], b: Set[Int]) => converge(a,b) }
   property("map should converge") = forAll { (a: Map[String, String], b: Map[String, String]) => converge(a, b) }
